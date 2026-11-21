@@ -256,7 +256,7 @@ class _HomeScreenState extends State<HomeScreen> {
       bigPictureStyle = BigPictureStyleInformation(
         FilePathAndroidBitmap(imagePath),
         contentTitle: '⏰ منبه الدواء: $medName ($medType)',
-        summaryText: 'الجرعة $doseNumber من $totalDoses \vert{} المقدار: $dosageAmount',
+        summaryText: 'الجرعة $doseNumber من $totalDoses | المقدار: $dosageAmount',
       );
     }
 
@@ -286,3 +286,467 @@ class _HomeScreenState extends State<HomeScreen> {
         ),
       ],
     );
+  }
+
+  Future<void> _scheduleAllDosesForMedicine(Medicine med) async {
+    final now = tz.TZDateTime.now(tz.local);
+
+    for (int i = 0; i < med.doseTimes.length; i++) {
+      final dose = med.doseTimes[i];
+      final int notificationId = (med.id * 10) + i;
+
+      var scheduledDate = tz.TZDateTime(
+        tz.local,
+        now.year,
+        now.month,
+        now.day,
+        dose.hour,
+        dose.minute,
+      );
+      if (scheduledDate.isBefore(now)) {
+        scheduledDate = scheduledDate.add(const Duration(days: 1));
+      }
+
+      final androidDetails = _buildAlarmNotificationDetails(
+        medName: med.name,
+        medType: med.type,
+        dosageAmount: med.dosageAmount,
+        doseNumber: i + 1,
+        totalDoses: med.doseTimes.length,
+        imagePath: med.imagePath,
+      );
+
+      await flutterLocalNotificationsPlugin.zonedSchedule(
+        notificationId,
+        '⏰ منبه الدواء: ${med.name}',
+        'النوع: ${med.type} | الجرعة ${i + 1} من ${med.doseTimes.length} (${med.dosageAmount})',
+        scheduledDate,
+        NotificationDetails(android: androidDetails),
+        androidScheduleMode: AndroidScheduleMode.exactAllowWhileIdle,
+        uiLocalNotificationDateInterpretation:
+            UILocalNotificationDateInterpretation.absoluteTime,
+        matchDateTimeComponents: DateTimeComponents.time,
+      );
+    }
+  }
+
+  Future<void> _testAlarmRingtone() async {
+    final androidDetails = _buildAlarmNotificationDetails(
+      medName: 'تجربة المنبه',
+      medType: 'أقراص',
+      dosageAmount: 'قرص واحد',
+      doseNumber: 1,
+      totalDoses: 1,
+    );
+
+    await flutterLocalNotificationsPlugin.show(
+      999999,
+      '⏰ تجربة رنة منبه Esmat',
+      'اضغط "تم أخذ الجرعة" لإيقاف الرنة',
+      NotificationDetails(android: androidDetails),
+    );
+  }
+
+  Future<void> _deleteMedicine(int index) async {
+    final med = medicines[index];
+    for (int i = 0; i < 10; i++) {
+      await flutterLocalNotificationsPlugin.cancel((med.id * 10) + i);
+    }
+    setState(() {
+      medicines.removeAt(index);
+    });
+    await _saveMedicines();
+  }
+
+  String _formatTime(int hour, int minute) {
+    final period = hour >= 12 ? 'مساءً' : 'صباحاً';
+    final displayHour = hour > 12 ? hour - 12 : (hour == 0 ? 12 : hour);
+    final displayMin = minute.toString().padLeft(2, '0');
+    return '$displayHour:$displayMin $period';
+  }
+
+  IconData _getTypeIcon(String type) {
+    switch (type) {
+      case 'شراب':
+        return Icons.liquor;
+      case 'حقن':
+        return Icons.vaccines;
+      case 'نقط':
+        return Icons.water_drop;
+      case 'مرهم / كريم':
+        return Icons.healing;
+      case 'فوار':
+        return Icons.local_drink;
+      case 'بخاخ':
+        return Icons.air;
+      default:
+        return Icons.medication;
+    }
+  }
+
+  void _showAddMedicineSheet() {
+    final nameController = TextEditingController();
+    final amountController = TextEditingController(text: 'قرص واحد');
+    String selectedType = medicineTypes.first;
+    int dosesCount = 1;
+    List<TimeOfDay> selectedTimes = [TimeOfDay.now()];
+    String? pickedImagePath;
+
+    showModalBottomSheet(
+      context: context,
+      isScrollControlled: true,
+      shape: const RoundedRectangleBorder(
+        borderRadius: BorderRadius.vertical(top: Radius.circular(20)),
+      ),
+      builder: (ctx) => StatefulBuilder(
+        builder: (context, setModalState) => Directionality(
+          textDirection: TextDirection.rtl,
+          child: Padding(
+            padding: EdgeInsets.only(
+              bottom: MediaQuery.of(context).viewInsets.bottom + 20,
+              left: 20,
+              right: 20,
+              top: 20,
+            ),
+            child: SingleChildScrollView(
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                crossAxisAlignment: CrossAxisAlignment.stretch,
+                children: [
+                  const Text(
+                    'إضافة دواء وجرعاته',
+                    style: TextStyle(fontSize: 20, fontWeight: FontWeight.bold),
+                    textAlign: TextAlign.center,
+                  ),
+                  const SizedBox(height: 16),
+                  TextField(
+                    controller: nameController,
+                    decoration: const InputDecoration(
+                      labelText: 'اسم الدواء',
+                      border: OutlineInputBorder(),
+                      prefixIcon: Icon(Icons.medication),
+                    ),
+                  ),
+                  const SizedBox(height: 12),
+                  Row(
+                    children: [
+                      Expanded(
+                        child: DropdownButtonFormField<String>(
+                          value: selectedType,
+                          decoration: const InputDecoration(
+                            labelText: 'نوع الدواء',
+                            border: OutlineInputBorder(),
+                          ),
+                          items: medicineTypes
+                              .map((type) => DropdownMenuItem(
+                                    value: type,
+                                    child: Text(type),
+                                  ))
+                              .toList(),
+                          onChanged: (val) {
+                            if (val != null) {
+                              setModalState(() {
+                                selectedType = val;
+                                if (val == 'شراب') {
+                                  amountController.text = '5 مل (ملعقة)';
+                                } else if (val == 'نقط') {
+                                  amountController.text = '5 نقط';
+                                } else if (val == 'حقن') {
+                                  amountController.text = 'حقنة واحدة';
+                                } else {
+                                  amountController.text = 'قرص واحد';
+                                }
+                              });
+                            }
+                          },
+                        ),
+                      ),
+                      const SizedBox(width: 10),
+                      Expanded(
+                        child: TextField(
+                          controller: amountController,
+                          decoration: const InputDecoration(
+                            labelText: 'مقدار الجرعة',
+                            border: OutlineInputBorder(),
+                          ),
+                        ),
+                      ),
+                    ],
+                  ),
+                  const SizedBox(height: 12),
+                  DropdownButtonFormField<int>(
+                    value: dosesCount,
+                    decoration: const InputDecoration(
+                      labelText: 'عدد الجرعات في اليوم',
+                      border: OutlineInputBorder(),
+                      prefixIcon: Icon(Icons.repeat),
+                    ),
+                    items: const [
+                      DropdownMenuItem(value: 1, child: Text('جرعة واحدة يومياً')),
+                      DropdownMenuItem(value: 2, child: Text('جرعتين يومياً (كل 12 ساعة)')),
+                      DropdownMenuItem(value: 3, child: Text('3 جرعات يومياً (كل 8 ساعات)')),
+                      DropdownMenuItem(value: 4, child: Text('4 جرعات يومياً (كل 6 ساعات)')),
+                    ],
+                    onChanged: (val) {
+                      if (val != null) {
+                        setModalState(() {
+                          dosesCount = val;
+                          final baseHour = selectedTimes.first.hour;
+                          final baseMin = selectedTimes.first.minute;
+                          final stepHours = 24 ~/ val;
+                          selectedTimes = List.generate(
+                            val,
+                            (index) => TimeOfDay(
+                              hour: (baseHour + (index * stepHours)) % 24,
+                              minute: baseMin,
+                            ),
+                          );
+                        });
+                      }
+                    },
+                  ),
+                  const SizedBox(height: 14),
+                  const Text(
+                    'مواعيد الجرعات (اضغط لتعديل أي ميعاد):',
+                    style: TextStyle(fontWeight: FontWeight.bold, fontSize: 15),
+                  ),
+                  const SizedBox(height: 8),
+                  ...List.generate(dosesCount, (i) {
+                    final t = selectedTimes[i];
+                    return Padding(
+                      padding: const EdgeInsets.only(bottom: 8),
+                      child: OutlinedButton.icon(
+                        icon: const Icon(Icons.alarm, color: Colors.teal),
+                        label: Text(
+                          'الجرعة ${i + 1}: ${_formatTime(t.hour, t.minute)}',
+                          style: const TextStyle(fontSize: 16),
+                        ),
+                        onPressed: () async {
+                          final picked = await showTimePicker(
+                            context: context,
+                            initialTime: t,
+                          );
+                          if (picked != null) {
+                            setModalState(() {
+                              selectedTimes[i] = picked;
+                            });
+                          }
+                        },
+                      ),
+                    );
+                  }),
+                  const SizedBox(height: 8),
+                  Row(
+                    children: [
+                      Expanded(
+                        child: OutlinedButton.icon(
+                          icon: const Icon(Icons.camera_alt),
+                          label: const Text('تصوير الدواء'),
+                          onPressed: () async {
+                            final picker = ImagePicker();
+                            final img = await picker.pickImage(
+                                source: ImageSource.camera);
+                            if (img != null) {
+                              setModalState(() => pickedImagePath = img.path);
+                            }
+                          },
+                        ),
+                      ),
+                      const SizedBox(width: 8),
+                      Expanded(
+                        child: OutlinedButton.icon(
+                          icon: const Icon(Icons.photo_library),
+                          label: const Text('من الاستوديو'),
+                          onPressed: () async {
+                            final picker = ImagePicker();
+                            final img = await picker.pickImage(
+                                source: ImageSource.gallery);
+                            if (img != null) {
+                              setModalState(() => pickedImagePath = img.path);
+                            }
+                          },
+                        ),
+                      ),
+                    ],
+                  ),
+                  if (pickedImagePath != null) ...[
+                    const SizedBox(height: 10),
+                    ClipRRect(
+                      borderRadius: BorderRadius.circular(10),
+                      child: Image.file(
+                        File(pickedImagePath!),
+                        height: 110,
+                        fit: BoxFit.cover,
+                      ),
+                    ),
+                  ],
+                  const SizedBox(height: 18),
+                  ElevatedButton(
+                    style: ElevatedButton.styleFrom(
+                      backgroundColor: Colors.teal.shade700,
+                      foregroundColor: Colors.white,
+                      padding: const EdgeInsets.symmetric(vertical: 14),
+                    ),
+                    onPressed: () async {
+                      if (nameController.text.trim().isEmpty) return;
+                      final newMed = Medicine(
+                        id: DateTime.now().millisecondsSinceEpoch ~/ 1000,
+                        name: nameController.text.trim(),
+                        type: selectedType,
+                        dosageAmount: amountController.text.trim().isEmpty
+                            ? 'جرعة واحدة'
+                            : amountController.text.trim(),
+                        doseTimes: selectedTimes
+                            .map((t) => DoseTime(hour: t.hour, minute: t.minute))
+                            .toList(),
+                        imagePath: pickedImagePath,
+                      );
+                      setState(() {
+                        medicines.add(newMed);
+                      });
+                      await _saveMedicines();
+                      await _scheduleAllDosesForMedicine(newMed);
+                      if (mounted) Navigator.pop(context);
+                    },
+                    child: const Text(
+                      'حفظ وتشغيل منبه الجرعات',
+                      style: TextStyle(fontSize: 16),
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      appBar: AppBar(
+        title: const Text('Esmat | مواعيد الأدوية'),
+        centerTitle: true,
+        backgroundColor: Colors.teal.shade700,
+        foregroundColor: Colors.white,
+        actions: [
+          IconButton(
+            tooltip: 'تجربة رنة المنبه',
+            icon: const Icon(Icons.notifications_active),
+            onPressed: _testAlarmRingtone,
+          ),
+        ],
+      ),
+      body: medicines.isEmpty
+          ? const Center(
+              child: Text(
+                'أهلاً بك في تطبيق Esmat\nمفيش أدوية متسجلة حالياً\nاضغط على (+) لإضافة دواء وجرعاته',
+                textAlign: TextAlign.center,
+                style: TextStyle(fontSize: 16, color: Colors.grey),
+              ),
+            )
+          : ListView.builder(
+              padding: const EdgeInsets.all(12),
+              itemCount: medicines.length,
+              itemBuilder: (context, index) {
+                final med = medicines[index];
+                final timesSummary = med.doseTimes
+                    .asMap()
+                    .entries
+                    .map((e) =>
+                        'ج${e.key + 1}: ${_formatTime(e.value.hour, e.value.minute)}')
+                    .join('  •  ');
+
+                return Card(
+                  margin: const EdgeInsets.only(bottom: 12),
+                  child: ListTile(
+                    contentPadding: const EdgeInsets.all(12),
+                    leading: med.imagePath != null &&
+                            File(med.imagePath!).existsSync()
+                        ? ClipRRect(
+                            borderRadius: BorderRadius.circular(8),
+                            child: Image.file(
+                              File(med.imagePath!),
+                              width: 60,
+                              height: 60,
+                              fit: BoxFit.cover,
+                            ),
+                          )
+                        : Container(
+                            width: 60,
+                            height: 60,
+                            decoration: BoxDecoration(
+                              color: Colors.teal.shade50,
+                              borderRadius: BorderRadius.circular(8),
+                            ),
+                            child: Icon(_getTypeIcon(med.type),
+                                color: Colors.teal, size: 32),
+                          ),
+                    title: Row(
+                      children: [
+                        Expanded(
+                          child: Text(
+                            med.name,
+                            style: const TextStyle(
+                                fontWeight: FontWeight.bold, fontSize: 18),
+                          ),
+                        ),
+                        Container(
+                          padding: const EdgeInsets.symmetric(
+                              horizontal: 8, vertical: 3),
+                          decoration: BoxDecoration(
+                            color: Colors.teal.shade50,
+                            borderRadius: BorderRadius.circular(12),
+                          ),
+                          child: Text(
+                            '${med.type} • ${med.doseTimes.length} جرعات',
+                            style: TextStyle(
+                              fontSize: 12,
+                              color: Colors.teal.shade800,
+                              fontWeight: FontWeight.bold,
+                            ),
+                          ),
+                        ),
+                      ],
+                    ),
+                    subtitle: Padding(
+                      padding: const EdgeInsets.only(top: 6),
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          Text(
+                            'المقدار: ${med.dosageAmount}',
+                            style: const TextStyle(
+                                fontSize: 14, color: Colors.black87),
+                          ),
+                          const SizedBox(height: 4),
+                          Text(
+                            timesSummary,
+                            style: TextStyle(
+                              color: Colors.teal.shade700,
+                              fontSize: 14,
+                              fontWeight: FontWeight.w600,
+                            ),
+                          ),
+                        ],
+                      ),
+                    ),
+                    trailing: IconButton(
+                      icon: const Icon(Icons.delete, color: Colors.red),
+                      onPressed: () => _deleteMedicine(index),
+                    ),
+                  ),
+                );
+              },
+            ),
+      floatingActionButton: FloatingActionButton.extended(
+        onPressed: _showAddMedicineSheet,
+        backgroundColor: Colors.teal.shade700,
+        foregroundColor: Colors.white,
+        icon: const Icon(Icons.add),
+        label: const Text('إضافة دواء'),
+      ),
+    );
+  }
+}
