@@ -1,6 +1,7 @@
 import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
+import 'dart:typed_data';
 import 'package:flutter/material.dart';
 import 'package:flutter_local_notifications/flutter_local_notifications.dart';
 import 'package:image_picker/image_picker.dart';
@@ -29,39 +30,73 @@ Future<void> _initNotifications() async {
     android: initializationSettingsAndroid,
   );
 
-  await flutterLocalNotificationsPlugin.initialize(initializationSettings);
+  await flutterLocalNotificationsPlugin.initialize(
+    initializationSettings,
+    onDidReceiveNotificationResponse: (NotificationResponse response) async {
+      if (response.id != null) {
+        await flutterLocalNotificationsPlugin.cancel(response.id!);
+      }
+    },
+  );
+}
+
+class DoseTime {
+  final int hour;
+  final int minute;
+
+  DoseTime({required this.hour, required this.minute});
+
+  Map<String, dynamic> toJson() => {'hour': hour, 'minute': minute};
+
+  factory DoseTime.fromJson(Map<String, dynamic> json) =>
+      DoseTime(hour: json['hour'], minute: json['minute']);
 }
 
 class Medicine {
   final int id;
   final String name;
-  final int hour;
-  final int minute;
+  final String type;
+  final String dosageAmount;
+  final List<DoseTime> doseTimes;
   final String? imagePath;
 
   Medicine({
     required this.id,
     required this.name,
-    required this.hour,
-    required this.minute,
+    required this.type,
+    required this.dosageAmount,
+    required this.doseTimes,
     this.imagePath,
   });
 
   Map<String, dynamic> toJson() => {
         'id': id,
         'name': name,
-        'hour': hour,
-        'minute': minute,
+        'type': type,
+        'dosageAmount': dosageAmount,
+        'doseTimes': doseTimes.map((e) => e.toJson()).toList(),
         'imagePath': imagePath,
       };
 
-  factory Medicine.fromJson(Map<String, dynamic> json) => Medicine(
-        id: json['id'],
-        name: json['name'],
-        hour: json['hour'],
-        minute: json['minute'],
-        imagePath: json['imagePath'],
-      );
+  factory Medicine.fromJson(Map<String, dynamic> json) {
+    List<DoseTime> parsedTimes = [];
+    if (json['doseTimes'] != null) {
+      parsedTimes = (json['doseTimes'] as List)
+          .map((e) => DoseTime.fromJson(e))
+          .toList();
+    } else if (json['hour'] != null && json['minute'] != null) {
+      parsedTimes = [DoseTime(hour: json['hour'], minute: json['minute'])];
+    }
+
+    return Medicine(
+      id: json['id'],
+      name: json['name'],
+      type: json['type'] ?? 'أقراص',
+      dosageAmount: json['dosageAmount'] ?? 'جرعة واحدة',
+      doseTimes: parsedTimes,
+      imagePath: json['imagePath'],
+    );
+  }
 }
 
 class EsmatMedicineApp extends StatelessWidget {
@@ -162,6 +197,17 @@ class HomeScreen extends StatefulWidget {
 class _HomeScreenState extends State<HomeScreen> {
   List<Medicine> medicines = [];
 
+  final List<String> medicineTypes = [
+    'أقراص',
+    'كبسولات',
+    'شراب',
+    'حقن',
+    'نقط',
+    'مرهم / كريم',
+    'فوار',
+    'بخاخ',
+  ];
+
   @override
   void initState() {
     super.initState();
@@ -173,6 +219,9 @@ class _HomeScreenState extends State<HomeScreen> {
     await Permission.notification.request();
     if (await Permission.scheduleExactAlarm.isDenied) {
       await Permission.scheduleExactAlarm.request();
+    }
+    if (await Permission.ignoreBatteryOptimizations.isDenied) {
+      await Permission.ignoreBatteryOptimizations.request();
     }
   }
 
@@ -194,273 +243,46 @@ class _HomeScreenState extends State<HomeScreen> {
     await prefs.setString('medicines_list', encoded);
   }
 
-  Future<void> _scheduleDailyAlarm(Medicine med) async {
-    final now = tz.TZDateTime.now(tz.local);
-    var scheduledDate = tz.TZDateTime(
-        tz.local, now.year, now.month, now.day, med.hour, med.minute);
-    if (scheduledDate.isBefore(now)) {
-      scheduledDate = scheduledDate.add(const Duration(days: 1));
-    }
-
+  AndroidNotificationDetails _buildAlarmNotificationDetails({
+    required String medName,
+    required String medType,
+    required String dosageAmount,
+    required int doseNumber,
+    required int totalDoses,
+    String? imagePath,
+  }) {
     BigPictureStyleInformation? bigPictureStyle;
-    if (med.imagePath != null && File(med.imagePath!).existsSync()) {
+    if (imagePath != null && File(imagePath).existsSync()) {
       bigPictureStyle = BigPictureStyleInformation(
-        FilePathAndroidBitmap(med.imagePath!),
-        contentTitle: 'Esmat | ميعاد الدواء: ${med.name}',
-        summaryText: 'اضغط لتأكيد أخذ الجرعة',
+        FilePathAndroidBitmap(imagePath),
+        contentTitle: '⏰ منبه الدواء: $medName ($medType)',
+        summaryText: 'الجرعة $doseNumber من $totalDoses \vert{} المقدار: $dosageAmount',
       );
     }
 
-    final AndroidNotificationDetails androidDetails =
-        AndroidNotificationDetails(
-      'esmat_medicine_alarm_v1',
-      'Esmat - منبه الأدوية',
-      channelDescription: 'تنبيهات مواعيد الأدوية اليومية',
+    return AndroidNotificationDetails(
+      'esmat_ringtone_alarm_channel_v2',
+      'Esmat - رنة منبه الأدوية',
+      channelDescription: 'تنبيهات برنة منبه مستمرة لمواعيد الأدوية',
       importance: Importance.max,
-      priority: Priority.high,
+      priority: Priority.max,
       playSound: true,
+      audioAttributesUsage: AudioAttributesUsage.alarm,
+      additionalFlags: Int32List.fromList([4]),
       enableVibration: true,
+      vibrationPattern: Int64List.fromList([0, 1000, 500, 1000, 500, 1000]),
       fullScreenIntent: true,
+      ongoing: true,
+      autoCancel: false,
       category: AndroidNotificationCategory.alarm,
+      visibility: NotificationVisibility.public,
       styleInformation: bigPictureStyle,
-    );
-
-    await flutterLocalNotificationsPlugin.zonedSchedule(
-      med.id,
-      'Esmat | حآن ميعاد الدواء 💊',
-      'اسم الدواء: ${med.name}',
-      scheduledDate,
-      NotificationDetails(android: androidDetails),
-      androidScheduleMode: AndroidScheduleMode.exactAllowWhileIdle,
-      uiLocalNotificationDateInterpretation:
-          UILocalNotificationDateInterpretation.absoluteTime,
-      matchDateTimeComponents: DateTimeComponents.time,
-    );
-  }
-
-  Future<void> _deleteMedicine(int index) async {
-    final med = medicines[index];
-    await flutterLocalNotificationsPlugin.cancel(med.id);
-    setState(() {
-      medicines.removeAt(index);
-    });
-    await _saveMedicines();
-  }
-
-  String _formatTime(int hour, int minute) {
-    final period = hour >= 12 ? 'مساءً' : 'صباحاً';
-    final displayHour = hour > 12 ? hour - 12 : (hour == 0 ? 12 : hour);
-    final displayMin = minute.toString().padLeft(2, '0');
-    return '$displayHour:$displayMin $period';
-  }
-
-  void _showAddMedicineSheet() {
-    final nameController = TextEditingController();
-    TimeOfDay selectedTime = TimeOfDay.now();
-    String? pickedImagePath;
-
-    showModalBottomSheet(
-      context: context,
-      isScrollControlled: true,
-      shape: const RoundedRectangleBorder(
-        borderRadius: BorderRadius.vertical(top: Radius.circular(20)),
-      ),
-      builder: (ctx) => StatefulBuilder(
-        builder: (context, setModalState) => Directionality(
-          textDirection: TextDirection.rtl,
-          child: Padding(
-            padding: EdgeInsets.only(
-              bottom: MediaQuery.of(context).viewInsets.bottom + 20,
-              left: 20,
-              right: 20,
-              top: 20,
-            ),
-            child: Column(
-              mainAxisSize: MainAxisSize.min,
-              crossAxisAlignment: CrossAxisAlignment.stretch,
-              children: [
-                const Text(
-                  'إضافة دواء جديد',
-                  style: TextStyle(fontSize: 20, fontWeight: FontWeight.bold),
-                  textAlign: TextAlign.center,
-                ),
-                const SizedBox(height: 16),
-                TextField(
-                  controller: nameController,
-                  decoration: const InputDecoration(
-                    labelText: 'اسم الدواء',
-                    border: OutlineInputBorder(),
-                    prefixIcon: Icon(Icons.medication),
-                  ),
-                ),
-                const SizedBox(height: 16),
-                OutlinedButton.icon(
-                  icon: const Icon(Icons.access_time),
-                  label: Text(
-                    'الميعاد: ${_formatTime(selectedTime.hour, selectedTime.minute)}',
-                    style: const TextStyle(fontSize: 16),
-                  ),
-                  onPressed: () async {
-                    final time = await showTimePicker(
-                      context: context,
-                      initialTime: selectedTime,
-                    );
-                    if (time != null) {
-                      setModalState(() => selectedTime = time);
-                    }
-                  },
-                ),
-                const SizedBox(height: 12),
-                Row(
-                  children: [
-                    Expanded(
-                      child: OutlinedButton.icon(
-                        icon: const Icon(Icons.camera_alt),
-                        label: const Text('تصوير الدواء'),
-                        onPressed: () async {
-                          final picker = ImagePicker();
-                          final img = await picker.pickImage(
-                              source: ImageSource.camera);
-                          if (img != null) {
-                            setModalState(() => pickedImagePath = img.path);
-                          }
-                        },
-                      ),
-                    ),
-                    const SizedBox(width: 8),
-                    Expanded(
-                      child: OutlinedButton.icon(
-                        icon: const Icon(Icons.photo_library),
-                        label: const Text('من الاستوديو'),
-                        onPressed: () async {
-                          final picker = ImagePicker();
-                          final img = await picker.pickImage(
-                              source: ImageSource.gallery);
-                          if (img != null) {
-                            setModalState(() => pickedImagePath = img.path);
-                          }
-                        },
-                      ),
-                    ),
-                  ],
-                ),
-                if (pickedImagePath != null) ...[
-                  const SizedBox(height: 10),
-                  ClipRRect(
-                    borderRadius: BorderRadius.circular(10),
-                    child: Image.file(
-                      File(pickedImagePath!),
-                      height: 120,
-                      fit: BoxFit.cover,
-                    ),
-                  ),
-                ],
-                const SizedBox(height: 20),
-                ElevatedButton(
-                  style: ElevatedButton.styleFrom(
-                    backgroundColor: Colors.teal.shade700,
-                    foregroundColor: Colors.white,
-                    padding: const EdgeInsets.symmetric(vertical: 14),
-                  ),
-                  onPressed: () async {
-                    if (nameController.text.trim().isEmpty) return;
-                    final newMed = Medicine(
-                      id: DateTime.now().millisecondsSinceEpoch ~/ 1000,
-                      name: nameController.text.trim(),
-                      hour: selectedTime.hour,
-                      minute: selectedTime.minute,
-                      imagePath: pickedImagePath,
-                    );
-                    setState(() {
-                      medicines.add(newMed);
-                    });
-                    await _saveMedicines();
-                    await _scheduleDailyAlarm(newMed);
-                    if (mounted) Navigator.pop(context);
-                  },
-                  child: const Text('حفظ وتشغيل المنبه',
-                      style: TextStyle(fontSize: 16)),
-                ),
-              ],
-            ),
-          ),
+      actions: const <AndroidNotificationAction>[
+        AndroidNotificationAction(
+          'confirm_dose',
+          '✅ تم أخذ الجرعة (إيقاف الرنة)',
+          cancelNotification: true,
+          showsUserInterface: true,
         ),
-      ),
+      ],
     );
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    return Scaffold(
-      appBar: AppBar(
-        title: const Text('Esmat | مواعيد الأدوية'),
-        centerTitle: true,
-        backgroundColor: Colors.teal.shade700,
-        foregroundColor: Colors.white,
-      ),
-      body: medicines.isEmpty
-          ? const Center(
-              child: Text(
-                'أهلاً بك في تطبيق Esmat\nمفيش أدوية متسجلة حالياً\nاضغط على (+) لإضافة دواء جديد',
-                textAlign: TextAlign.center,
-                style: TextStyle(fontSize: 16, color: Colors.grey),
-              ),
-            )
-          : ListView.builder(
-              padding: const EdgeInsets.all(12),
-              itemCount: medicines.length,
-              itemBuilder: (context, index) {
-                final med = medicines[index];
-                return Card(
-                  margin: const EdgeInsets.only(bottom: 12),
-                  child: ListTile(
-                    contentPadding: const EdgeInsets.all(12),
-                    leading: med.imagePath != null &&
-                            File(med.imagePath!).existsSync()
-                        ? ClipRRect(
-                            borderRadius: BorderRadius.circular(8),
-                            child: Image.file(
-                              File(med.imagePath!),
-                              width: 60,
-                              height: 60,
-                              fit: BoxFit.cover,
-                            ),
-                          )
-                        : Container(
-                            width: 60,
-                            height: 60,
-                            decoration: BoxDecoration(
-                              color: Colors.teal.shade50,
-                              borderRadius: BorderRadius.circular(8),
-                            ),
-                            child: const Icon(Icons.medication,
-                                color: Colors.teal, size: 32),
-                          ),
-                    title: Text(
-                      med.name,
-                      style: const TextStyle(
-                          fontWeight: FontWeight.bold, fontSize: 18),
-                    ),
-                    subtitle: Text(
-                      'يومياً الساعة: ${_formatTime(med.hour, med.minute)}',
-                      style:
-                          TextStyle(color: Colors.teal.shade700, fontSize: 15),
-                    ),
-                    trailing: IconButton(
-                      icon: const Icon(Icons.delete, color: Colors.red),
-                      onPressed: () => _deleteMedicine(index),
-                    ),
-                  ),
-                );
-              },
-            ),
-      floatingActionButton: FloatingActionButton.extended(
-        onPressed: _showAddMedicineSheet,
-        backgroundColor: Colors.teal.shade700,
-        foregroundColor: Colors.white,
-        icon: const Icon(Icons.add),
-        label: const Text('إضافة دواء'),
-      ),
-    );
-  }
-}
