@@ -3,7 +3,6 @@ import 'dart:convert';
 import 'dart:io';
 import 'dart:math';
 import 'dart:typed_data';
-import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_local_notifications/flutter_local_notifications.dart';
 import 'package:image_picker/image_picker.dart';
@@ -61,8 +60,6 @@ class Medicine {
   final String dosageAmount;
   final List<DoseTime> doseTimes;
   final String? imagePath;
-  final String? ringtonePath;
-  final String? ringtoneName;
 
   Medicine({
     required this.id,
@@ -71,8 +68,6 @@ class Medicine {
     required this.dosageAmount,
     required this.doseTimes,
     this.imagePath,
-    this.ringtonePath,
-    this.ringtoneName,
   });
 
   Map<String, dynamic> toJson() => {
@@ -82,8 +77,6 @@ class Medicine {
         'dosageAmount': dosageAmount,
         'doseTimes': doseTimes.map((e) => e.toJson()).toList(),
         'imagePath': imagePath,
-        'ringtonePath': ringtonePath,
-        'ringtoneName': ringtoneName,
       };
 
   factory Medicine.fromJson(Map<String, dynamic> json) {
@@ -97,14 +90,14 @@ class Medicine {
     }
 
     return Medicine(
-      id: json['id'] is int ? json['id'] % 100000 : Random().nextInt(90000) + 1000,
+      id: json['id'] is int
+          ? json['id'] % 90000
+          : Random().nextInt(80000) + 1000,
       name: json['name'] ?? '',
       type: json['type'] ?? 'أقراص',
       dosageAmount: json['dosageAmount'] ?? 'جرعة واحدة',
       doseTimes: parsedTimes,
       imagePath: json['imagePath'],
-      ringtonePath: json['ringtonePath'],
-      ringtoneName: json['ringtoneName'],
     );
   }
 }
@@ -221,11 +214,11 @@ class _HomeScreenState extends State<HomeScreen> {
   @override
   void initState() {
     super.initState();
-    _requestAllRequiredPermissions();
+    _requestAllPermissions();
     _loadMedicines();
   }
 
-  Future<void> _requestAllRequiredPermissions() async {
+  Future<void> _requestAllPermissions() async {
     final androidPlugin = flutterLocalNotificationsPlugin
         .resolvePlatformSpecificImplementation<
             AndroidFlutterLocalNotificationsPlugin>();
@@ -259,15 +252,13 @@ class _HomeScreenState extends State<HomeScreen> {
     await prefs.setString('medicines_list', encoded);
   }
 
-  AndroidNotificationDetails _buildAlarmNotificationDetails({
-    required String channelKey,
+  AndroidNotificationDetails _buildAlarmDetails({
     required String medName,
     required String medType,
     required String dosageAmount,
     required int doseNumber,
     required int totalDoses,
     String? imagePath,
-    String? ringtonePath,
   }) {
     BigPictureStyleInformation? bigPictureStyle;
     if (imagePath != null && File(imagePath).existsSync()) {
@@ -278,24 +269,13 @@ class _HomeScreenState extends State<HomeScreen> {
       );
     }
 
-    AndroidNotificationSound? customSound;
-    String channelId = 'esmat_alarm_default_v3';
-    String channelName = 'Esmat - منبه الأدوية';
-
-    if (ringtonePath != null && File(ringtonePath).existsSync()) {
-      customSound = UriAndroidNotificationSound(Uri.file(ringtonePath).toString());
-      channelId = 'esmat_alarm_custom_$channelKey';
-      channelName = 'Esmat - منبه $medName';
-    }
-
     return AndroidNotificationDetails(
-      channelId,
-      channelName,
-      channelDescription: 'تنبيهات مواعيد الأدوية برنة منبه',
+      'esmat_alarm_ringtone_v4',
+      'Esmat - نغمة منبه الأدوية',
+      channelDescription: 'تنبيهات مواعيد الأدوية برنة منبه مستمرة',
       importance: Importance.max,
       priority: Priority.max,
       playSound: true,
-      sound: customSound,
       audioAttributesUsage: AudioAttributesUsage.alarm,
       additionalFlags: Int32List.fromList([4]),
       enableVibration: true,
@@ -317,8 +297,7 @@ class _HomeScreenState extends State<HomeScreen> {
     );
   }
 
-  Future<void> _scheduleAllDosesForMedicine(Medicine med) async {
-    await _requestAllRequiredPermissions();
+  Future<void> _scheduleMedicineDoses(Medicine med) async {
     final now = tz.TZDateTime.now(tz.local);
 
     for (int i = 0; i < med.doseTimes.length; i++) {
@@ -337,15 +316,13 @@ class _HomeScreenState extends State<HomeScreen> {
         scheduledDate = scheduledDate.add(const Duration(days: 1));
       }
 
-      final androidDetails = _buildAlarmNotificationDetails(
-        channelKey: '${med.id}_${med.ringtonePath.hashCode}',
+      final androidDetails = _buildAlarmDetails(
         medName: med.name,
         medType: med.type,
         dosageAmount: med.dosageAmount,
         doseNumber: i + 1,
         totalDoses: med.doseTimes.length,
         imagePath: med.imagePath,
-        ringtonePath: med.ringtonePath,
       );
 
       await flutterLocalNotificationsPlugin.zonedSchedule(
@@ -363,20 +340,17 @@ class _HomeScreenState extends State<HomeScreen> {
   }
 
   Future<void> _testAlarmNow() async {
-    await _requestAllRequiredPermissions();
-    final lastMed = medicines.isNotEmpty ? medicines.last : null;
-    final androidDetails = _buildAlarmNotificationDetails(
-      channelKey: lastMed != null ? '${lastMed.id}_${lastMed.ringtonePath.hashCode}' : 'test',
-      medName: lastMed?.name ?? 'تجربة المنبه',
-      medType: lastMed?.type ?? 'أقراص',
-      dosageAmount: lastMed?.dosageAmount ?? 'قرص واحد',
+    await _requestAllPermissions();
+    final androidDetails = _buildAlarmDetails(
+      medName: 'تجربة المنبه',
+      medType: 'أقراص',
+      dosageAmount: 'قرص واحد',
       doseNumber: 1,
       totalDoses: 1,
-      ringtonePath: lastMed?.ringtonePath,
     );
 
     await flutterLocalNotificationsPlugin.show(
-      88888,
+      77777,
       '⏰ تجربة منبه Esmat',
       'اضغط "تم أخذ الجرعة" لإيقاف الرنة',
       NotificationDetails(android: androidDetails),
@@ -398,7 +372,7 @@ class _HomeScreenState extends State<HomeScreen> {
 
     if (mounted) {
       ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text('تم حذف ${med.name} وإلغاء منبهاته')),
+        SnackBar(content: Text('تم حذف ${med.name}')),
       );
     }
   }
@@ -436,8 +410,6 @@ class _HomeScreenState extends State<HomeScreen> {
     int dosesCount = 1;
     List<TimeOfDay> selectedTimes = [TimeOfDay.now()];
     String? pickedImagePath;
-    String? pickedRingtonePath;
-    String? pickedRingtoneName;
     bool isSaving = false;
 
     showModalBottomSheet(
@@ -584,27 +556,6 @@ class _HomeScreenState extends State<HomeScreen> {
                     );
                   }),
                   const SizedBox(height: 8),
-                  OutlinedButton.icon(
-                    icon: const Icon(Icons.music_note, color: Colors.deepOrange),
-                    label: Text(
-                      pickedRingtoneName != null
-                          ? 'النغمة: $pickedRingtoneName'
-                          : 'اختيار نغمة رنين من الجهاز (اختياري)',
-                      overflow: TextOverflow.ellipsis,
-                    ),
-                    onPressed: () async {
-                      final result = await FilePicker.platform.pickFiles(
-                        type: FileType.audio,
-                      );
-                      if (result != null && result.files.single.path != null) {
-                        setModalState(() {
-                          pickedRingtonePath = result.files.single.path;
-                          pickedRingtoneName = result.files.single.name;
-                        });
-                      }
-                    },
-                  ),
-                  const SizedBox(height: 8),
                   Row(
                     children: [
                       Expanded(
@@ -614,8 +565,7 @@ class _HomeScreenState extends State<HomeScreen> {
                           onPressed: () async {
                             final picker = ImagePicker();
                             final img = await picker.pickImage(
-                                source: ImageSource.camera,
-                                imageQuality: 70);
+                                source: ImageSource.camera, imageQuality: 70);
                             if (img != null) {
                               setModalState(() => pickedImagePath = img.path);
                             }
@@ -630,8 +580,7 @@ class _HomeScreenState extends State<HomeScreen> {
                           onPressed: () async {
                             final picker = ImagePicker();
                             final img = await picker.pickImage(
-                                source: ImageSource.gallery,
-                                imageQuality: 70);
+                                source: ImageSource.gallery, imageQuality: 70);
                             if (img != null) {
                               setModalState(() => pickedImagePath = img.path);
                             }
@@ -664,7 +613,7 @@ class _HomeScreenState extends State<HomeScreen> {
                             if (nameController.text.trim().isEmpty) return;
                             setModalState(() => isSaving = true);
 
-                            final safeId = Random().nextInt(90000) + 1000;
+                            final safeId = Random().nextInt(80000) + 1000;
                             final newMed = Medicine(
                               id: safeId,
                               name: nameController.text.trim(),
@@ -673,11 +622,10 @@ class _HomeScreenState extends State<HomeScreen> {
                                   ? 'جرعة واحدة'
                                   : amountController.text.trim(),
                               doseTimes: selectedTimes
-                                  .map((t) => DoseTime(hour: t.hour, minute: t.minute))
+                                  .map((t) =>
+                                      DoseTime(hour: t.hour, minute: t.minute))
                                   .toList(),
                               imagePath: pickedImagePath,
-                              ringtonePath: pickedRingtonePath,
-                              ringtoneName: pickedRingtoneName,
                             );
 
                             setState(() {
@@ -686,25 +634,15 @@ class _HomeScreenState extends State<HomeScreen> {
                             await _saveMedicines();
 
                             try {
-                              await _scheduleAllDosesForMedicine(newMed);
-                            } catch (e) {
-                              if (mounted) {
-                                ScaffoldMessenger.of(context).showSnackBar(
-                                  const SnackBar(
-                                    content: Text(
-                                      'تم الحفظ، تأكد من تفعيل إذن التنبيهات الدقيقة من إعدادات الهاتف',
-                                    ),
-                                  ),
-                                );
-                              }
-                            }
+                              await _scheduleMedicineDoses(newMed);
+                            } catch (_) {}
 
                             if (mounted) {
                               Navigator.pop(context);
                               ScaffoldMessenger.of(context).showSnackBar(
                                 SnackBar(
                                   content: Text(
-                                      'تم ضبط منبه ${newMed.name} (${newMed.doseTimes.length} جرعات)'),
+                                      'تم حفظ منبه ${newMed.name} (${newMed.doseTimes.length} جرعات)'),
                                 ),
                               );
                             }
@@ -732,16 +670,11 @@ class _HomeScreenState extends State<HomeScreen> {
         backgroundColor: Colors.teal.shade700,
         foregroundColor: Colors.white,
         leading: IconButton(
-          tooltip: 'تفعيل أذونات المنبه',
-          icon: const Icon(Icons.security),
+          tooltip: 'إعدادات النغمة والأذونات',
+          icon: const Icon(Icons.settings),
           onPressed: () async {
-            await _requestAllRequiredPermissions();
-            if (mounted) {
-              ScaffoldMessenger.of(context).showSnackBar(
-                const SnackBar(
-                    content: Text('تم طلب أذونات المنبه والعمل في الخلفية')),
-              );
-            }
+            await _requestAllPermissions();
+            await openAppSettings();
           },
         ),
         actions: [
@@ -843,14 +776,6 @@ class _HomeScreenState extends State<HomeScreen> {
                               fontWeight: FontWeight.w600,
                             ),
                           ),
-                          if (med.ringtoneName != null) ...[
-                            const SizedBox(height: 4),
-                            Text(
-                              '🎵 النغمة: ${med.ringtoneName}',
-                              style: const TextStyle(
-                                  fontSize: 12, color: Colors.deepOrange),
-                            ),
-                          ],
                         ],
                       ),
                     ),
