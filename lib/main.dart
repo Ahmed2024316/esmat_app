@@ -262,7 +262,6 @@ class _HomeScreenState extends State<HomeScreen> {
     await prefs.setString('medicines_list', encoded);
   }
 
-  /// نسخ الملف الصوتي أو الصورة إلى مجلد التطبيق الدائم لضمان عمله في الخلفية
   Future<String> _saveFilePermanently(String sourcePath, String prefix) async {
     final dir = await getApplicationDocumentsDirectory();
     final ext = sourcePath.split('.').last;
@@ -297,7 +296,7 @@ class _HomeScreenState extends State<HomeScreen> {
     }
 
     AndroidNotificationSound? customSound;
-    String channelId = 'esmat_alarm_default_v5';
+    String channelId = 'esmat_alarm_default_v7';
     String channelName = 'Esmat - منبه الأدوية';
 
     if (ringtonePath != null && File(ringtonePath).existsSync()) {
@@ -387,7 +386,7 @@ class _HomeScreenState extends State<HomeScreen> {
     final androidDetails = _buildAlarmDetails(
       channelKey: lastMed != null
           ? '${lastMed.id}_${lastMed.ringtonePath.hashCode}'
-          : 'test_v5',
+          : 'test_v7',
       medName: lastMed?.name ?? 'تجربة المنبه',
       medType: lastMed?.type ?? 'أقراص',
       dosageAmount: lastMed?.dosageAmount ?? 'قرص واحد',
