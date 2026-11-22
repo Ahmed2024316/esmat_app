@@ -3,8 +3,10 @@ import 'dart:convert';
 import 'dart:io';
 import 'dart:math';
 import 'dart:typed_data';
+import 'package:audioplayers/audioplayers.dart';
 import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_local_notifications/flutter_local_notifications.dart';
 import 'package:image_picker/image_picker.dart';
 import 'package:path_provider/path_provider.dart';
@@ -15,6 +17,19 @@ import 'package:timezone/timezone.dart' as tz;
 
 final FlutterLocalNotificationsPlugin flutterLocalNotificationsPlugin =
     FlutterLocalNotificationsPlugin();
+
+final GlobalKey<NavigatorState> navigatorKey = GlobalKey<NavigatorState>();
+final AudioPlayer globalAlarmPlayer = AudioPlayer();
+
+String? pendingAlarmPayload;
+bool isAlarmScreenOpen = false;
+
+@pragma('vm:entry-point')
+void notificationTapBackground(NotificationResponse response) {
+  if (response.payload != null && response.payload!.isNotEmpty) {
+    pendingAlarmPayload = response.payload;
+  }
+}
 
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
@@ -33,14 +48,59 @@ Future<void> _initNotifications() async {
     android: initializationSettingsAndroid,
   );
 
+  final launchDetails =
+      await flutterLocalNotificationsPlugin.getNotificationAppLaunchDetails();
+  if (launchDetails != null &&
+      launchDetails.didNotificationLaunchApp &&
+      launchDetails.notificationResponse?.payload != null) {
+    pendingAlarmPayload = launchDetails.notificationResponse!.payload;
+  }
+
   await flutterLocalNotificationsPlugin.initialize(
     initializationSettings,
     onDidReceiveNotificationResponse: (NotificationResponse response) async {
       if (response.id != null) {
         await flutterLocalNotificationsPlugin.cancel(response.id!);
       }
+      if (response.actionId == 'confirm_dose') {
+        await globalAlarmPlayer.stop();
+        return;
+      }
+      if (response.payload != null && response.payload!.isNotEmpty) {
+        _openIncomingCallAlarmScreen(response.payload!);
+      }
     },
+    onDidReceiveBackgroundNotificationResponse: notificationTapBackground,
   );
+}
+
+void _openIncomingCallAlarmScreen(String payload) {
+  if (isAlarmScreenOpen) return;
+  try {
+    final Map<String, dynamic> data = jsonDecode(payload);
+    isAlarmScreenOpen = true;
+    navigatorKey.currentState?.push(
+      MaterialPageRoute(
+        fullscreenDialog: true,
+        builder: (_) => Directionality(
+          textDirection: TextDirection.rtl,
+          child: IncomingCallAlarmScreen(
+            medId: data['id'] ?? 1000,
+            medName: data['name'] ?? 'الدواء',
+            medType: data['type'] ?? 'أقراص',
+            dosageAmount: data['dosageAmount'] ?? 'جرعة واحدة',
+            doseInfo: data['doseInfo'] ?? '',
+            imagePath: data['imagePath'],
+            ringtonePath: data['ringtonePath'],
+          ),
+        ),
+      ),
+    ).then((_) {
+      isAlarmScreenOpen = false;
+    });
+  } catch (_) {
+    isAlarmScreenOpen = false;
+  }
 }
 
 class DoseTime {
@@ -118,6 +178,7 @@ class EsmatMedicineApp extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return MaterialApp(
+      navigatorKey: navigatorKey,
       debugShowCheckedModeBanner: false,
       title: 'Esmat - منبه الدواء',
       theme: ThemeData(
@@ -140,17 +201,23 @@ class _SplashScreenState extends State<SplashScreen> {
   @override
   void initState() {
     super.initState();
-    Timer(const Duration(milliseconds: 1200), () {
-      if (mounted) {
-        Navigator.pushReplacement(
-          context,
-          MaterialPageRoute(
-            builder: (_) => const Directionality(
-              textDirection: TextDirection.rtl,
-              child: HomeScreen(),
-            ),
+    Timer(const Duration(milliseconds: 600), () {
+      if (!mounted) return;
+      Navigator.pushReplacement(
+        context,
+        MaterialPageRoute(
+          builder: (_) => const Directionality(
+            textDirection: TextDirection.rtl,
+            child: HomeScreen(),
           ),
-        );
+        ),
+      );
+      if (pendingAlarmPayload != null) {
+        final payload = pendingAlarmPayload!;
+        pendingAlarmPayload = null;
+        Future.delayed(const Duration(milliseconds: 150), () {
+          _openIncomingCallAlarmScreen(payload);
+        });
       }
     });
   }
@@ -200,6 +267,382 @@ class _SplashScreenState extends State<SplashScreen> {
   }
 }
 
+/// واجهة تشبه شاشة الاتصال الوارد (قبول / كنسلة أو تأجيل) مع صورة الدواء والنغمة المحددة
+class IncomingCallAlarmScreen extends StatefulWidget {
+  final int medId;
+  final String medName;
+  final String medType;
+  final String dosageAmount;
+  final String doseInfo;
+  final String? imagePath;
+  final String? ringtonePath;
+
+  const IncomingCallAlarmScreen({
+    super.key,
+    required this.medId,
+    required this.medName,
+    required this.medType,
+    required this.dosageAmount,
+    required this.doseInfo,
+    this.imagePath,
+    this.ringtonePath,
+  });
+
+  @override
+  State<IncomingCallAlarmScreen> createState() =>
+      _IncomingCallAlarmScreenState();
+}
+
+class _IncomingCallAlarmScreenState extends State<IncomingCallAlarmScreen>
+    with SingleTickerProviderStateMixin {
+  late AnimationController _pulseController;
+  Timer? _vibrationTimer;
+
+  @override
+  void initState() {
+    super.initState();
+    _pulseController = AnimationController(
+      vsync: this,
+      duration: const Duration(milliseconds: 900),
+    )..repeat(reverse: true);
+
+    _startRingtoneAndVibration();
+  }
+
+  Future<void> _startRingtoneAndVibration() async {
+    // اهتزاز متكرر مثل المكالمة الواردة
+    HapticFeedback.heavyImpact();
+    _vibrationTimer = Timer.periodic(const Duration(seconds: 2), (_) {
+      HapticFeedback.heavyImpact();
+    });
+
+    try {
+      await globalAlarmPlayer.stop();
+      await globalAlarmPlayer.setReleaseMode(ReleaseMode.loop);
+      await globalAlarmPlayer.setVolume(1.0);
+      await globalAlarmPlayer.setAudioContext(
+        AudioContext(
+          android: const AudioContextAndroid(
+            isSpeakerphoneOn: true,
+            stayAwake: true,
+            contentType: AndroidContentType.sonification,
+            usageType: AndroidUsageType.alarm,
+            audioFocus: AndroidAudioFocus.gain,
+          ),
+        ),
+      );
+
+      if (widget.ringtonePath != null &&
+          File(widget.ringtonePath!).existsSync()) {
+        await globalAlarmPlayer.play(DeviceFileSource(widget.ringtonePath!));
+      }
+    } catch (_) {}
+  }
+
+  Future<void> _acceptDose() async {
+    _vibrationTimer?.cancel();
+    await globalAlarmPlayer.stop();
+    await flutterLocalNotificationsPlugin.cancelAll();
+    if (mounted) {
+      Navigator.pop(context);
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          backgroundColor: Colors.green.shade700,
+          content: Text('✅ بالشفاء العاجل! تم تسجيل أخذ ${widget.medName}'),
+        ),
+      );
+    }
+  }
+
+  Future<void> _snoozeOrCancelDose() async {
+    _vibrationTimer?.cancel();
+    await globalAlarmPlayer.stop();
+    await flutterLocalNotificationsPlugin.cancelAll();
+
+    // إعادة التذكير بعد 10 دقائق تلقائياً
+    final snoozeTime =
+        tz.TZDateTime.now(tz.local).add(const Duration(minutes: 10));
+    final payload = jsonEncode({
+      'id': widget.medId,
+      'name': widget.medName,
+      'type': widget.medType,
+      'dosageAmount': widget.dosageAmount,
+      'doseInfo': 'تذكير مؤجل (بعد 10 دقائق)',
+      'imagePath': widget.imagePath,
+      'ringtonePath': widget.ringtonePath,
+    });
+
+    final androidDetails = AndroidNotificationDetails(
+      'esmat_call_alarm_v10',
+      'Esmat - مكالمة منبه الدواء',
+      channelDescription: 'تنبيهات مواعيد الأدوية بواجهة اتصال',
+      importance: Importance.max,
+      priority: Priority.max,
+      playSound: true,
+      audioAttributesUsage: AudioAttributesUsage.alarm,
+      additionalFlags: Int32List.fromList([4]),
+      fullScreenIntent: true,
+      ongoing: true,
+      autoCancel: false,
+      category: AndroidNotificationCategory.call,
+      visibility: NotificationVisibility.public,
+    );
+
+    await flutterLocalNotificationsPlugin.zonedSchedule(
+      99999,
+      '📞 تذكير مؤجل: ${widget.medName}',
+      'حان موعد أخذ الجرعة (${widget.dosageAmount})',
+      snoozeTime,
+      NotificationDetails(android: androidDetails),
+      payload: payload,
+      androidScheduleMode: AndroidScheduleMode.exactAllowWhileIdle,
+      uiLocalNotificationDateInterpretation:
+          UILocalNotificationDateInterpretation.absoluteTime,
+    );
+
+    if (mounted) {
+      Navigator.pop(context);
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text('🔕 تم تأجيل المنبه وسيعاود الرنين بعد 10 دقائق'),
+        ),
+      );
+    }
+  }
+
+  @override
+  void dispose() {
+    _vibrationTimer?.cancel();
+    _pulseController.dispose();
+    globalAlarmPlayer.stop();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final hasImage =
+        widget.imagePath != null && File(widget.imagePath!).existsSync();
+
+    return Scaffold(
+      body: Container(
+        decoration: const BoxDecoration(
+          gradient: LinearGradient(
+            begin: Alignment.topCenter,
+            end: Alignment.bottomCenter,
+            colors: [
+              Color(0xFF0A2E2A),
+              Color(0xFF061A18),
+              Color(0xFF000000),
+            ],
+          ),
+        ),
+        child: SafeArea(
+          child: Padding(
+            padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 20),
+            child: Column(
+              mainAxisAlignment: MainAxisAlignment.spaceBetween,
+              children: [
+                // الجزء العلوي: شارة مكالمة دواء واردة + اسم الدواء
+                Column(
+                  children: [
+                    const SizedBox(height: 10),
+                    Container(
+                      padding: const EdgeInsets.symmetric(
+                          horizontal: 16, vertical: 6),
+                      decoration: BoxDecoration(
+                        color: Colors.tealAccent.withValues(alpha: 0.15),
+                        borderRadius: BorderRadius.circular(30),
+                        border: Border.all(
+                            color: Colors.tealAccent.withValues(alpha: 0.4)),
+                      ),
+                      child: const Row(
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
+                          Icon(Icons.phone_in_talk,
+                              color: Colors.tealAccent, size: 18),
+                          SizedBox(width: 8),
+                          Text(
+                            'منبه موعد الدواء...',
+                            style: TextStyle(
+                              color: Colors.tealAccent,
+                              fontSize: 16,
+                              fontWeight: FontWeight.bold,
+                            ),
+                          ),
+                        ],
+                      ),
+                    ),
+                    const SizedBox(height: 18),
+                    Text(
+                      widget.medName,
+                      style: const TextStyle(
+                        fontSize: 36,
+                        fontWeight: FontWeight.bold,
+                        color: Colors.white,
+                      ),
+                      textAlign: TextAlign.center,
+                    ),
+                    const SizedBox(height: 8),
+                    Text(
+                      '${widget.medType}  •  ${widget.dosageAmount}',
+                      style: const TextStyle(
+                        fontSize: 22,
+                        color: Colors.amberAccent,
+                        fontWeight: FontWeight.w600,
+                      ),
+                      textAlign: TextAlign.center,
+                    ),
+                    if (widget.doseInfo.isNotEmpty) ...[
+                      const SizedBox(height: 6),
+                      Text(
+                        widget.doseInfo,
+                        style: const TextStyle(
+                          fontSize: 16,
+                          color: Colors.white70,
+                        ),
+                      ),
+                    ],
+                  ],
+                ),
+
+                // المنتصف: صورة علبة الدواء بإطار نبّاض مثل صورة المتصل
+                AnimatedBuilder(
+                  animation: _pulseController,
+                  builder: (context, child) {
+                    final scale = 1.0 + (_pulseController.value * 0.06);
+                    return Transform.scale(
+                      scale: scale,
+                      child: Container(
+                        width: 240,
+                        height: 240,
+                        decoration: BoxDecoration(
+                          shape: BoxShape.circle,
+                          boxShadow: [
+                            BoxShadow(
+                              color: Colors.tealAccent.withValues(
+                                  alpha: 0.25 + (_pulseController.value * 0.25)),
+                              blurRadius: 30,
+                              spreadRadius: 8,
+                            ),
+                          ],
+                          border: Border.all(
+                            color: Colors.tealAccent,
+                            width: 4,
+                          ),
+                        ),
+                        child: ClipOval(
+                          child: hasImage
+                              ? Image.file(
+                                  File(widget.imagePath!),
+                                  fit: BoxFit.cover,
+                                )
+                              : Container(
+                                  color: Colors.teal.shade900,
+                                  child: const Icon(
+                                    Icons.medication,
+                                    size: 110,
+                                    color: Colors.white,
+                                  ),
+                                ),
+                        ),
+                      ),
+                    );
+                  },
+                ),
+
+                // الأسفل: أزرار الرد (تم أخذ الجرعة) والكنسلة (تأجيل 10 دقائق) مثل شاشة الاتصال
+                Padding(
+                  padding: const EdgeInsets.only(bottom: 16),
+                  child: Row(
+                    mainAxisAlignment: MainAxisAlignment.spaceAround,
+                    children: [
+                      // زر الكنسلة / التأجيل (أحمر)
+                      Column(
+                        children: [
+                          GestureDetector(
+                            onTap: _snoozeOrCancelDose,
+                            child: Container(
+                              width: 78,
+                              height: 78,
+                              decoration: BoxDecoration(
+                                color: Colors.red.shade600,
+                                shape: BoxShape.circle,
+                                boxShadow: [
+                                  BoxShadow(
+                                    color: Colors.red.withValues(alpha: 0.4),
+                                    blurRadius: 16,
+                                    spreadRadius: 2,
+                                  ),
+                                ],
+                              ),
+                              child: const Icon(
+                                Icons.call_end,
+                                color: Colors.white,
+                                size: 38,
+                              ),
+                            ),
+                          ),
+                          const SizedBox(height: 10),
+                          const Text(
+                            'تأجيل 10 د',
+                            style: TextStyle(
+                              color: Colors.white,
+                              fontSize: 16,
+                              fontWeight: FontWeight.bold,
+                            ),
+                          ),
+                        ],
+                      ),
+
+                      // زر القبول / تم أخذ الجرعة (أخضر)
+                      Column(
+                        children: [
+                          GestureDetector(
+                            onTap: _acceptDose,
+                            child: Container(
+                              width: 78,
+                              height: 78,
+                              decoration: BoxDecoration(
+                                color: Colors.green.shade500,
+                                shape: BoxShape.circle,
+                                boxShadow: [
+                                  BoxShadow(
+                                    color: Colors.green.withValues(alpha: 0.5),
+                                    blurRadius: 20,
+                                    spreadRadius: 4,
+                                  ),
+                                ],
+                              ),
+                              child: const Icon(
+                                Icons.check,
+                                color: Colors.white,
+                                size: 42,
+                              ),
+                            ),
+                          ),
+                          const SizedBox(height: 10),
+                          const Text(
+                            'تم أخذ الجرعة',
+                            style: TextStyle(
+                              color: Colors.white,
+                              fontSize: 16,
+                              fontWeight: FontWeight.bold,
+                            ),
+                          ),
+                        ],
+                      ),
+                    ],
+                  ),
+                ),
+              ],
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+}
+
 class HomeScreen extends StatefulWidget {
   const HomeScreen({super.key});
 
@@ -207,8 +650,10 @@ class HomeScreen extends StatefulWidget {
   State<HomeScreen> createState() => _HomeScreenState();
 }
 
-class _HomeScreenState extends State<HomeScreen> {
+class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
   List<Medicine> medicines = [];
+  Timer? _foregroundAlarmTimer;
+  String? _lastTriggeredKey;
 
   final List<String> medicineTypes = [
     'أقراص',
@@ -224,8 +669,79 @@ class _HomeScreenState extends State<HomeScreen> {
   @override
   void initState() {
     super.initState();
+    WidgetsBinding.instance.addObserver(this);
     _requestAllPermissions();
     _loadMedicines();
+    _startForegroundWatcher();
+  }
+
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    if (state == AppLifecycleState.resumed) {
+      _checkIfDoseJustArrived();
+    }
+  }
+
+  /// فحص فوري عند فتح التطبيق من شاشة القفل لفتح واجهة الاتصال مباشرة
+  void _checkIfDoseJustArrived() {
+    final now = DateTime.now();
+    for (final med in medicines) {
+      for (int i = 0; i < med.doseTimes.length; i++) {
+        final dose = med.doseTimes[i];
+        if (now.hour == dose.hour &&
+            (now.minute == dose.minute || now.minute == (dose.minute + 1) % 60)) {
+          final key = '${med.id}_${now.day}_${dose.hour}_${dose.minute}';
+          if (_lastTriggeredKey != key) {
+            _lastTriggeredKey = key;
+            _openIncomingCallAlarmScreen(jsonEncode({
+              'id': med.id,
+              'name': med.name,
+              'type': med.type,
+              'dosageAmount': med.dosageAmount,
+              'doseInfo': 'الجرعة ${i + 1} من ${med.doseTimes.length}',
+              'imagePath': med.imagePath,
+              'ringtonePath': med.ringtonePath,
+            }));
+          }
+        }
+      }
+    }
+  }
+
+  void _startForegroundWatcher() {
+    _foregroundAlarmTimer =
+        Timer.periodic(const Duration(seconds: 1), (timer) {
+      final now = DateTime.now();
+      for (final med in medicines) {
+        for (int i = 0; i < med.doseTimes.length; i++) {
+          final dose = med.doseTimes[i];
+          if (now.hour == dose.hour &&
+              now.minute == dose.minute &&
+              now.second < 3) {
+            final key = '${med.id}_${now.day}_${now.hour}_${now.minute}';
+            if (_lastTriggeredKey != key) {
+              _lastTriggeredKey = key;
+              _openIncomingCallAlarmScreen(jsonEncode({
+                'id': med.id,
+                'name': med.name,
+                'type': med.type,
+                'dosageAmount': med.dosageAmount,
+                'doseInfo': 'الجرعة ${i + 1} من ${med.doseTimes.length}',
+                'imagePath': med.imagePath,
+                'ringtonePath': med.ringtonePath,
+              }));
+            }
+          }
+        }
+      }
+    });
+  }
+
+  @override
+  void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
+    _foregroundAlarmTimer?.cancel();
+    super.dispose();
   }
 
   Future<void> _requestAllPermissions() async {
@@ -272,14 +788,12 @@ class _HomeScreenState extends State<HomeScreen> {
   }
 
   AndroidNotificationDetails _buildAlarmDetails({
-    required String channelKey,
     required String medName,
     required String medType,
     required String dosageAmount,
     required int doseNumber,
     required int totalDoses,
     String? imagePath,
-    String? ringtonePath,
   }) {
     BigPictureStyleInformation? bigPictureStyle;
     FilePathAndroidBitmap? largeIconBitmap;
@@ -290,30 +804,18 @@ class _HomeScreenState extends State<HomeScreen> {
       bigPictureStyle = BigPictureStyleInformation(
         bitmap,
         largeIcon: bitmap,
-        contentTitle: '⏰ حان موعد: $medName ($medType)',
+        contentTitle: '📞 موعد الدواء: $medName ($medType)',
         summaryText: 'الجرعة $doseNumber من $totalDoses | المقدار: $dosageAmount',
       );
     }
 
-    AndroidNotificationSound? customSound;
-    String channelId = 'esmat_alarm_default_v7';
-    String channelName = 'Esmat - منبه الأدوية';
-
-    if (ringtonePath != null && File(ringtonePath).existsSync()) {
-      customSound =
-          UriAndroidNotificationSound(Uri.file(ringtonePath).toString());
-      channelId = 'esmat_alarm_ring_$channelKey';
-      channelName = 'Esmat - نغمة $medName';
-    }
-
     return AndroidNotificationDetails(
-      channelId,
-      channelName,
-      channelDescription: 'تنبيهات مواعيد الأدوية مع صورة الدواء ونغمة مخصصة',
+      'esmat_call_alarm_v10',
+      'Esmat - مكالمة منبه الدواء',
+      channelDescription: 'تنبيهات مواعيد الأدوية بواجهة اتصال وصورة الدواء',
       importance: Importance.max,
       priority: Priority.max,
       playSound: true,
-      sound: customSound,
       audioAttributesUsage: AudioAttributesUsage.alarm,
       additionalFlags: Int32List.fromList([4]),
       enableVibration: true,
@@ -321,14 +823,19 @@ class _HomeScreenState extends State<HomeScreen> {
       fullScreenIntent: true,
       ongoing: true,
       autoCancel: false,
-      category: AndroidNotificationCategory.alarm,
+      category: AndroidNotificationCategory.call,
       visibility: NotificationVisibility.public,
       largeIcon: largeIconBitmap,
       styleInformation: bigPictureStyle,
       actions: const <AndroidNotificationAction>[
         AndroidNotificationAction(
+          'open_alarm',
+          '📞 فتح شاشة الدواء',
+          showsUserInterface: true,
+        ),
+        AndroidNotificationAction(
           'confirm_dose',
-          '✅ تم أخذ الجرعة (إيقاف)',
+          '✅ تم أخذ الجرعة',
           cancelNotification: true,
           showsUserInterface: true,
         ),
@@ -355,23 +862,32 @@ class _HomeScreenState extends State<HomeScreen> {
         scheduledDate = scheduledDate.add(const Duration(days: 1));
       }
 
+      final payload = jsonEncode({
+        'id': med.id,
+        'name': med.name,
+        'type': med.type,
+        'dosageAmount': med.dosageAmount,
+        'doseInfo': 'الجرعة ${i + 1} من ${med.doseTimes.length}',
+        'imagePath': med.imagePath,
+        'ringtonePath': med.ringtonePath,
+      });
+
       final androidDetails = _buildAlarmDetails(
-        channelKey: '${med.id}_${med.ringtonePath.hashCode}',
         medName: med.name,
         medType: med.type,
         dosageAmount: med.dosageAmount,
         doseNumber: i + 1,
         totalDoses: med.doseTimes.length,
         imagePath: med.imagePath,
-        ringtonePath: med.ringtonePath,
       );
 
       await flutterLocalNotificationsPlugin.zonedSchedule(
         notificationId,
-        '⏰ حان موعد: ${med.name}',
+        '📞 موعد الدواء: ${med.name}',
         'النوع: ${med.type} | الجرعة ${i + 1} من ${med.doseTimes.length} (${med.dosageAmount})',
         scheduledDate,
         NotificationDetails(android: androidDetails),
+        payload: payload,
         androidScheduleMode: AndroidScheduleMode.exactAllowWhileIdle,
         uiLocalNotificationDateInterpretation:
             UILocalNotificationDateInterpretation.absoluteTime,
@@ -381,27 +897,16 @@ class _HomeScreenState extends State<HomeScreen> {
   }
 
   Future<void> _testAlarmNow() async {
-    await _requestAllPermissions();
     final lastMed = medicines.isNotEmpty ? medicines.last : null;
-    final androidDetails = _buildAlarmDetails(
-      channelKey: lastMed != null
-          ? '${lastMed.id}_${lastMed.ringtonePath.hashCode}'
-          : 'test_v7',
-      medName: lastMed?.name ?? 'تجربة المنبه',
-      medType: lastMed?.type ?? 'أقراص',
-      dosageAmount: lastMed?.dosageAmount ?? 'قرص واحد',
-      doseNumber: 1,
-      totalDoses: 1,
-      imagePath: lastMed?.imagePath,
-      ringtonePath: lastMed?.ringtonePath,
-    );
-
-    await flutterLocalNotificationsPlugin.show(
-      77777,
-      '⏰ تجربة منبه: ${lastMed?.name ?? "Esmat"}',
-      'اسحب الإشعار لأسفل لرؤية صورة العلاج أو اضغط إيقاف',
-      NotificationDetails(android: androidDetails),
-    );
+    _openIncomingCallAlarmScreen(jsonEncode({
+      'id': lastMed?.id ?? 1000,
+      'name': lastMed?.name ?? 'تجربة مكالمة الدواء',
+      'type': lastMed?.type ?? 'أقراص',
+      'dosageAmount': lastMed?.dosageAmount ?? 'قرص واحد',
+      'doseInfo': 'معاينة شاشة الاتصال والصورة والنغمة',
+      'imagePath': lastMed?.imagePath,
+      'ringtonePath': lastMed?.ringtonePath,
+    }));
   }
 
   Future<void> _deleteMedicine(int index) async {
@@ -757,8 +1262,8 @@ class _HomeScreenState extends State<HomeScreen> {
         ),
         actions: [
           IconButton(
-            tooltip: 'تجربة المنبه والصورة الآن',
-            icon: const Icon(Icons.notifications_active),
+            tooltip: 'تجربة واجهة الاتصال الآن',
+            icon: const Icon(Icons.phone_in_talk),
             onPressed: _testAlarmNow,
           ),
         ],
@@ -787,6 +1292,17 @@ class _HomeScreenState extends State<HomeScreen> {
                   margin: const EdgeInsets.only(bottom: 12),
                   child: ListTile(
                     contentPadding: const EdgeInsets.all(12),
+                    onTap: () {
+                      _openIncomingCallAlarmScreen(jsonEncode({
+                        'id': med.id,
+                        'name': med.name,
+                        'type': med.type,
+                        'dosageAmount': med.dosageAmount,
+                        'doseInfo': 'معاينة شاشة الاتصال والنغمة',
+                        'imagePath': med.imagePath,
+                        'ringtonePath': med.ringtonePath,
+                      }));
+                    },
                     leading: med.imagePath != null &&
                             File(med.imagePath!).existsSync()
                         ? ClipRRect(
