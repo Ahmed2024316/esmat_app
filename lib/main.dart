@@ -3,9 +3,11 @@ import 'dart:convert';
 import 'dart:io';
 import 'dart:math';
 import 'dart:typed_data';
+import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_local_notifications/flutter_local_notifications.dart';
 import 'package:image_picker/image_picker.dart';
+import 'package:path_provider/path_provider.dart';
 import 'package:permission_handler/permission_handler.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:timezone/data/latest_all.dart' as tz;
@@ -60,6 +62,8 @@ class Medicine {
   final String dosageAmount;
   final List<DoseTime> doseTimes;
   final String? imagePath;
+  final String? ringtonePath;
+  final String? ringtoneName;
 
   Medicine({
     required this.id,
@@ -68,6 +72,8 @@ class Medicine {
     required this.dosageAmount,
     required this.doseTimes,
     this.imagePath,
+    this.ringtonePath,
+    this.ringtoneName,
   });
 
   Map<String, dynamic> toJson() => {
@@ -77,6 +83,8 @@ class Medicine {
         'dosageAmount': dosageAmount,
         'doseTimes': doseTimes.map((e) => e.toJson()).toList(),
         'imagePath': imagePath,
+        'ringtonePath': ringtonePath,
+        'ringtoneName': ringtoneName,
       };
 
   factory Medicine.fromJson(Map<String, dynamic> json) {
@@ -98,6 +106,8 @@ class Medicine {
       dosageAmount: json['dosageAmount'] ?? 'جرعة واحدة',
       doseTimes: parsedTimes,
       imagePath: json['imagePath'],
+      ringtonePath: json['ringtonePath'],
+      ringtoneName: json['ringtoneName'],
     );
   }
 }
@@ -252,30 +262,59 @@ class _HomeScreenState extends State<HomeScreen> {
     await prefs.setString('medicines_list', encoded);
   }
 
+  /// نسخ الملف الصوتي أو الصورة إلى مجلد التطبيق الدائم لضمان عمله في الخلفية
+  Future<String> _saveFilePermanently(String sourcePath, String prefix) async {
+    final dir = await getApplicationDocumentsDirectory();
+    final ext = sourcePath.split('.').last;
+    final destPath =
+        '${dir.path}/${prefix}_${DateTime.now().millisecondsSinceEpoch}.$ext';
+    final copied = await File(sourcePath).copy(destPath);
+    return copied.path;
+  }
+
   AndroidNotificationDetails _buildAlarmDetails({
+    required String channelKey,
     required String medName,
     required String medType,
     required String dosageAmount,
     required int doseNumber,
     required int totalDoses,
     String? imagePath,
+    String? ringtonePath,
   }) {
     BigPictureStyleInformation? bigPictureStyle;
+    FilePathAndroidBitmap? largeIconBitmap;
+
     if (imagePath != null && File(imagePath).existsSync()) {
+      final bitmap = FilePathAndroidBitmap(imagePath);
+      largeIconBitmap = bitmap;
       bigPictureStyle = BigPictureStyleInformation(
-        FilePathAndroidBitmap(imagePath),
-        contentTitle: '⏰ منبه الدواء: $medName ($medType)',
+        bitmap,
+        largeIcon: bitmap,
+        contentTitle: '⏰ حان موعد: $medName ($medType)',
         summaryText: 'الجرعة $doseNumber من $totalDoses | المقدار: $dosageAmount',
       );
     }
 
+    AndroidNotificationSound? customSound;
+    String channelId = 'esmat_alarm_default_v5';
+    String channelName = 'Esmat - منبه الأدوية';
+
+    if (ringtonePath != null && File(ringtonePath).existsSync()) {
+      customSound =
+          UriAndroidNotificationSound(Uri.file(ringtonePath).toString());
+      channelId = 'esmat_alarm_ring_$channelKey';
+      channelName = 'Esmat - نغمة $medName';
+    }
+
     return AndroidNotificationDetails(
-      'esmat_alarm_ringtone_v4',
-      'Esmat - نغمة منبه الأدوية',
-      channelDescription: 'تنبيهات مواعيد الأدوية برنة منبه مستمرة',
+      channelId,
+      channelName,
+      channelDescription: 'تنبيهات مواعيد الأدوية مع صورة الدواء ونغمة مخصصة',
       importance: Importance.max,
       priority: Priority.max,
       playSound: true,
+      sound: customSound,
       audioAttributesUsage: AudioAttributesUsage.alarm,
       additionalFlags: Int32List.fromList([4]),
       enableVibration: true,
@@ -285,6 +324,7 @@ class _HomeScreenState extends State<HomeScreen> {
       autoCancel: false,
       category: AndroidNotificationCategory.alarm,
       visibility: NotificationVisibility.public,
+      largeIcon: largeIconBitmap,
       styleInformation: bigPictureStyle,
       actions: const <AndroidNotificationAction>[
         AndroidNotificationAction(
@@ -317,17 +357,19 @@ class _HomeScreenState extends State<HomeScreen> {
       }
 
       final androidDetails = _buildAlarmDetails(
+        channelKey: '${med.id}_${med.ringtonePath.hashCode}',
         medName: med.name,
         medType: med.type,
         dosageAmount: med.dosageAmount,
         doseNumber: i + 1,
         totalDoses: med.doseTimes.length,
         imagePath: med.imagePath,
+        ringtonePath: med.ringtonePath,
       );
 
       await flutterLocalNotificationsPlugin.zonedSchedule(
         notificationId,
-        '⏰ منبه الدواء: ${med.name}',
+        '⏰ حان موعد: ${med.name}',
         'النوع: ${med.type} | الجرعة ${i + 1} من ${med.doseTimes.length} (${med.dosageAmount})',
         scheduledDate,
         NotificationDetails(android: androidDetails),
@@ -341,18 +383,24 @@ class _HomeScreenState extends State<HomeScreen> {
 
   Future<void> _testAlarmNow() async {
     await _requestAllPermissions();
+    final lastMed = medicines.isNotEmpty ? medicines.last : null;
     final androidDetails = _buildAlarmDetails(
-      medName: 'تجربة المنبه',
-      medType: 'أقراص',
-      dosageAmount: 'قرص واحد',
+      channelKey: lastMed != null
+          ? '${lastMed.id}_${lastMed.ringtonePath.hashCode}'
+          : 'test_v5',
+      medName: lastMed?.name ?? 'تجربة المنبه',
+      medType: lastMed?.type ?? 'أقراص',
+      dosageAmount: lastMed?.dosageAmount ?? 'قرص واحد',
       doseNumber: 1,
       totalDoses: 1,
+      imagePath: lastMed?.imagePath,
+      ringtonePath: lastMed?.ringtonePath,
     );
 
     await flutterLocalNotificationsPlugin.show(
       77777,
-      '⏰ تجربة منبه Esmat',
-      'اضغط "تم أخذ الجرعة" لإيقاف الرنة',
+      '⏰ تجربة منبه: ${lastMed?.name ?? "Esmat"}',
+      'اسحب الإشعار لأسفل لرؤية صورة العلاج أو اضغط إيقاف',
       NotificationDetails(android: androidDetails),
     );
   }
@@ -410,6 +458,8 @@ class _HomeScreenState extends State<HomeScreen> {
     int dosesCount = 1;
     List<TimeOfDay> selectedTimes = [TimeOfDay.now()];
     String? pickedImagePath;
+    String? pickedRingtonePath;
+    String? pickedRingtoneName;
     bool isSaving = false;
 
     showModalBottomSheet(
@@ -556,6 +606,29 @@ class _HomeScreenState extends State<HomeScreen> {
                     );
                   }),
                   const SizedBox(height: 8),
+                  OutlinedButton.icon(
+                    icon: const Icon(Icons.music_note, color: Colors.deepOrange),
+                    label: Text(
+                      pickedRingtoneName != null
+                          ? 'النغمة: $pickedRingtoneName'
+                          : 'إضافة نغمة من الجهاز (اختياري)',
+                      overflow: TextOverflow.ellipsis,
+                    ),
+                    onPressed: () async {
+                      final result = await FilePicker.platform.pickFiles(
+                        type: FileType.audio,
+                      );
+                      if (result != null && result.files.single.path != null) {
+                        final savedAudio = await _saveFilePermanently(
+                            result.files.single.path!, 'ringtone');
+                        setModalState(() {
+                          pickedRingtonePath = savedAudio;
+                          pickedRingtoneName = result.files.single.name;
+                        });
+                      }
+                    },
+                  ),
+                  const SizedBox(height: 8),
                   Row(
                     children: [
                       Expanded(
@@ -567,7 +640,9 @@ class _HomeScreenState extends State<HomeScreen> {
                             final img = await picker.pickImage(
                                 source: ImageSource.camera, imageQuality: 70);
                             if (img != null) {
-                              setModalState(() => pickedImagePath = img.path);
+                              final savedImg = await _saveFilePermanently(
+                                  img.path, 'med_img');
+                              setModalState(() => pickedImagePath = savedImg);
                             }
                           },
                         ),
@@ -582,7 +657,9 @@ class _HomeScreenState extends State<HomeScreen> {
                             final img = await picker.pickImage(
                                 source: ImageSource.gallery, imageQuality: 70);
                             if (img != null) {
-                              setModalState(() => pickedImagePath = img.path);
+                              final savedImg = await _saveFilePermanently(
+                                  img.path, 'med_img');
+                              setModalState(() => pickedImagePath = savedImg);
                             }
                           },
                         ),
@@ -626,6 +703,8 @@ class _HomeScreenState extends State<HomeScreen> {
                                       DoseTime(hour: t.hour, minute: t.minute))
                                   .toList(),
                               imagePath: pickedImagePath,
+                              ringtonePath: pickedRingtonePath,
+                              ringtoneName: pickedRingtoneName,
                             );
 
                             setState(() {
@@ -670,7 +749,7 @@ class _HomeScreenState extends State<HomeScreen> {
         backgroundColor: Colors.teal.shade700,
         foregroundColor: Colors.white,
         leading: IconButton(
-          tooltip: 'إعدادات النغمة والأذونات',
+          tooltip: 'إعدادات الأذونات',
           icon: const Icon(Icons.settings),
           onPressed: () async {
             await _requestAllPermissions();
@@ -679,7 +758,7 @@ class _HomeScreenState extends State<HomeScreen> {
         ),
         actions: [
           IconButton(
-            tooltip: 'تجربة رنة المنبه الآن',
+            tooltip: 'تجربة المنبه والصورة الآن',
             icon: const Icon(Icons.notifications_active),
             onPressed: _testAlarmNow,
           ),
@@ -776,6 +855,14 @@ class _HomeScreenState extends State<HomeScreen> {
                               fontWeight: FontWeight.w600,
                             ),
                           ),
+                          if (med.ringtoneName != null) ...[
+                            const SizedBox(height: 4),
+                            Text(
+                              '🎵 النغمة: ${med.ringtoneName}',
+                              style: const TextStyle(
+                                  fontSize: 12, color: Colors.deepOrange),
+                            ),
+                          ],
                         ],
                       ),
                     ),
